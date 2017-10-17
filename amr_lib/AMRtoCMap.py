@@ -315,10 +315,6 @@ class AMRtoCMap:
         return results
 
 
-
-
-
-
 class AMRCorpusExtConverter:
 
     def __init__(self, amr_corpus, propbank_data, output_path):

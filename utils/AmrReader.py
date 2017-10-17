@@ -139,6 +139,11 @@ class AMRReader:
         self.amr_corpus = pickle.load(infile)
         return self.amr_corpus
 
+    def is_file_exist(self):
+        """
+        Checking whether the file exist or not
+        """
+        return os.path.isfile(os.path.join(self.output_path, 'amr_corpus.pickle'))
 
 if __name__ == '__main__':
     amr_reader = AMRReader('/home/acp16hh/Data/abstract_meaning_representation_amr_2.0/',
