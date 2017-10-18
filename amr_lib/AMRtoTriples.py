@@ -1,69 +1,70 @@
 import re
 import pickle
 import os
-import queue
-import spacy
 from collections import defaultdict
 from amr_hackathon import amr
 from utils.PropBankReader import PropBankReader
 from utils.AmrReader import AMRReader
 
-class AMRtoCMap:
+
+class AMRtoTriples:
 
     def __init__(self, amr_data, propbank):
         self.amr_data = amr_data
         self.propbank = propbank
+        self.triples_linkers = None
+        self.triples = {}
         self.amr_obj = amr.AMR(self.amr_data['amr'], self.amr_data['tok'])
         self.var2c = self.amr_obj.var2concept()
 
+
     def convert(self) -> dict:
         """
-        Convert an AMR data to list of CMaps
-        :param data: data['amr'] should contains amr string, and data['tok'] should contain amr tokens
-        :return: a list of cmap tuple (subject, predicate, object)
+        Convert an AMR data to list of triples
         """
-        def get_CMap_linker():
+        def get_triples_linker():
             """
-            Retrieve all of the CMap linking phrases from the AMR object. We use the Framenet words that are found in the AMR Object as the linker.
+            Retrieve all of the triples linking phrases from the AMR object.
+            We use the Framenet words that are found in the AMR Object as the linker.
             """
-
-            cmap_linkers = []
+            triples_linkers = []
             concepts = list(self.amr_obj.concepts())
-            for concept in concepts:
-                triplet = self.amr_obj.triples(head=concept[0])
-                items = [item for item in triplet if 'ARG' in item[1]]
-                if len(items) > 0:
-                    cmap_linkers.append(triplet)
-            return cmap_linkers
 
-        def build_CMap():
-            """
-            Given a linking phrases from the CMap, retrieve the AMR object
-            """
+            # Retrieve all concept that has the word ARG in it
+            for concept in concepts:
+                triple = self.amr_obj.triples(head=concept[0])
+                items = [item for item in triple if 'ARG' in item[1]]
+                if len(items) > 0:
+                    triples_linkers.append(triple)
+            return triples_linkers
+
+        def generate_triples():
 
             def fixing_annotation(key, n):
-                '''
+                """
                 Fixing some inconsistency in the annotation
-                '''
+                """
                 if key + '.' + n not in self.propbank:
                     key = key.replace('-', '_')
                 return key + '.' + n
 
-            def is_agent(rel, rel_var):
-                '''
+            def is_agent(f_rel, rel_var):
+                """
                 Checking whether the role is an agent (denoted by 'pag') or not
-                '''
+                """
+                # TODO: beside 'pag' is there any other role?
                 m = re.match(r'(.*)-(\d*)$', rel_var)
                 key = m.group(1)
                 n = m.group(2)
 
+                # some annotation does not have the correspondence frameset, just put false if found
                 if n == '00':
                     return False
 
                 concept = fixing_annotation(key, n)
                 roleset = self.propbank[concept]
 
-                m = re.match(r':ARG(.{1}).*', rel[1])
+                m = re.match(r':ARG(.).*', f_rel[1])
                 n = int(m.group(1))
                 roles = roleset.getElementsByTagName('role')
 
@@ -72,70 +73,70 @@ class AMRtoCMap:
                         return True
                 return False
 
-            self.cmaps = {}
-            for cmap_linker in self.cmap_linkers:
-                cmap = [None, cmap_linker[0][0], []]
-                for rel in cmap_linker:
+            # Case 1: ARG
+            for triple_linker in self.triples_linkers:
+                triple = [None, triple_linker[0][0], []]
+                for rel in triple_linker:
                     if 'ARG' in rel[1] and 'of' not in rel[1]:
-                        # check wether the propbank verb rel[0] and its argument rel[2] is an agent or not
+                        # check whether the propbank verb rel[0] and its argument rel[2] is an agent or not
                         if is_agent(rel, self.var2c[rel[0]].__str__()):
-                            cmap[0] = rel[2]
+                            triple[0] = rel[2]
                         else:
-                            cmap[2].append(rel[2])
-                if not (cmap[0] is None and cmap[2] == []):
-                    self.cmaps[cmap[1]] = cmap
+                            triple[2].append(rel[2])
+                if not (triple[0] is None and triple[2] == []):
+                    self.triples[triple[1]] = triple
 
-            for cmap_linker in self.cmap_linkers:
-                for rel in cmap_linker:
+            # Case 2: ARG-of
+            for triple_linker in self.triples_linkers:
+                for rel in triple_linker:
                     if 'ARG' in rel[1] and 'of' in rel[1]:
-                        if rel[2] not in self.cmaps:
-                            self.cmaps[rel[2]] = [None, rel[2], []]
+                        if rel[2] not in self.triples:
+                            self.triples[rel[2]] = [None, rel[2], []]
                         if is_agent(rel, self.var2c[rel[2]].__str__()):
-                            self.cmaps[rel[2]][0] = rel[0]
+                            self.triples[rel[2]][0] = rel[0]
                         else:
-                            self.cmaps[rel[2]][2].append(rel[0])
+                            self.triples[rel[2]][2].append(rel[0])
+            return self.triples
 
-        self.cmap_linkers = get_CMap_linker()
-        build_CMap()
-        return self.cmaps
+        self.triples_linkers = get_triples_linker()
+        return generate_triples()
 
-
-
-    def build_amr_string_from_CMap(self):
-
-        def get_alignment(concept_var):
-            '''
+    def generate_amr_string_from_triples(self):
+        """
+        Given a triple, generate an amr string from it
+        """
+        def get_alignment(f_concept_var):
+            """
             Get alignment for a single concept
-            '''
+            """
             for triplet, a in self.amr_obj.alignments().items():
-                if concept_var == triplet[0] and triplet[1] == ':instance-of':
+                if f_concept_var == triplet[0] and triplet[1] == ':instance-of':
                     return int(a.split('.')[1].split(',')[0])
 
-        def get_all_amr_string(concept_var, sep, left=True):
-            '''
+        def get_all_amr_string(f_concept_var):
+            """
             Get all amr string from the concept
-            '''
-
-            def get_triplet(key):
-                result_triplets = []
-                triplets = self.amr_obj.triples(dep=key, rel=':ARG-of', normalize_inverses=True)
-                if triplets:
-                    result_triplets.extend(triplets)
-                triplets = self.amr_obj.triples(head=key)
-                if triplets:
-                    result_triplets.extend(triplets)
-                return result_triplets
+            """
+            def get_triples(key):
+                result_triples = []
+                f_triples = self.amr_obj.triples(dep=key, rel=':ARG-of', normalize_inverses=True)
+                if f_triples:
+                    result_triples.extend(f_triples)
+                f_triples = self.amr_obj.triples(head=key)
+                if f_triples:
+                    result_triples.extend(f_triples)
+                return result_triples
             entry = defaultdict(int)
             q = []
-            q.append((amr.Var('TOP'), ':top', concept_var))
-            entry[concept_var] += 1
+            q.append((amr.Var('TOP'), ':top', f_concept_var))
+            entry[f_concept_var] += 1
             reentrancies = self.amr_obj.reentrancies()
-            all_triplets = []
+            all_triples = []
             while q:
                 u = q.pop()
-                all_triplets.append(u)
-                triplets = get_triplet(u[2])
-                for triplet in triplets[::-1]:
+                all_triples.append(u)
+                triples = get_triples(u[2])
+                for triplet in triples[::-1]:
                     if triplet[2] in reentrancies:
                         if entry[triplet[2]] <= reentrancies[triplet[2]] + 1:
                             q.append(triplet)
@@ -149,7 +150,7 @@ class AMRtoCMap:
             align = role_align = {}
             concept_stack_depth = {
                 None: 0}  # size of the stack when the :instance-of triple was encountered for the variable
-            for h, r, d in all_triplets + [(None, None, None)]:
+            for h, r, d in all_triples + [(None, None, None)]:
                 align_key = align.get((h, r, d), '')
                 role_align_key = role_align.get((h, r, d), '')
                 if r == ':top':
@@ -237,12 +238,12 @@ class AMRtoCMap:
         #
         #     def get_triplet(key):
         #         result_triplets = []
-        #         triplets = self.amr_obj.triples(dep=key, rel=':ARG-of', normalize_inverses=True)
-        #         if triplets:
-        #             result_triplets.extend(triplets)
-        #         triplets = self.amr_obj.triples(head=key)
-        #         if triplets:
-        #             result_triplets.extend(triplets)
+        #         triples = self.amr_obj.f_triples(dep=key, rel=':ARG-of', normalize_inverses=True)
+        #         if triples:
+        #             result_triplets.extend(triples)
+        #         triples = self.amr_obj.f_triples(head=key)
+        #         if triples:
+        #             result_triplets.extend(triples)
         #         return result_triplets
         #
         #     triplets_stor = {}
@@ -256,8 +257,8 @@ class AMRtoCMap:
         #     reentrancies = self.amr_obj.reentrancies()
         #     while not q.empty():
         #         u = q.get()
-        #         triplets = get_triplet(u)
-        #         for triplet in triplets:
+        #         triples = get_triplet(u)
+        #         for triplet in triples:
         #             if triplet not in triplets_stor:
         #                 triplets_stor[triplet] = 0
         #             if type(triplet[2]) is amr.Var:
@@ -281,29 +282,25 @@ class AMRtoCMap:
         #                 result_alignments.append(idx)
         #     return alignment_to_text(result_alignments)
 
-
-
-        if self.cmaps == {}:
+        if self.triples == {}:
             return ''
 
-        # en_nlp = spacy.load('en')
         results = []
-        for key, cmap in self.cmaps.items():
-            result = ['', '', '']
-            result_1 = get_alignment(cmap[1])
+        for key, triple in self.triples.items():
+            result_1 = get_alignment(triple[1])
             if result_1 is None:
                 continue
-            if cmap[0] is not None:
-                result_0 = get_all_amr_string(cmap[0], result_1, True)
+            if triple[0] is not None:
+                result_0 = get_all_amr_string(triple[0])
             else:
                 result_0 = ''
-            for concept_var in cmap[2]:
-                if concept_var != []:
-                    result_2 = get_all_amr_string(concept_var, result[1], False)
+            for concept_var in triple[2]:
+                if concept_var:
+                    result_2 = get_all_amr_string(concept_var)
                     if len(result_2.split(' ')) == 1:
                         if not result_2.startswith('('):
                             result_2 = '(' + result_2 + ')'
-                    results.append((result_0, self.amr_obj.var2concept()[cmap[1]]._name, result_2))
+                    results.append((result_0, self.amr_obj.var2concept()[triple[1]]._name, result_2))
 
         # f = open('amr_string.txt', 'w')
         # for l, m, r in results:
@@ -316,54 +313,62 @@ class AMRtoCMap:
 
 
 class AMRCorpusExtConverter:
+    """
+    Read the amr corpus and update the amr with triples
+    """
+    def __init__(self, c_amr_corpus, c_propbank_data, output_path):
+        self.amr_corpus = c_amr_corpus
+        self.propbank_data = c_propbank_data
+        self.output_path = os.path.join(output_path, 'data')
 
-    def __init__(self, amr_corpus, propbank_data, output_path):
-        self.amr_corpus = amr_corpus
-        self.propbank_data = propbank_data
-        self.output_path = output_path
-
-    def convert_amr_to_cmaps(self):
+    def update_amr_corpus_with_triples(self):
         for dataset_name, dataset in self.amr_corpus.items():
-            if dataset_name != 'dev':
-                continue
             for doc_name, doc in dataset.items():
-                for id, amr_data in doc.items():
-                    amr_to_cmap = AMRtoCMap(amr_data, propbank_data)
-                    self.amr_corpus[dataset_name][doc_name][id]['cmaps'] = amr_to_cmap.convert()
-                    self.amr_corpus[dataset_name][doc_name][id]['cmaps_text'] = amr_to_cmap.build_amr_string_from_CMap()
+                for amr_id, amr_data in doc.items():
+                    amr_to_triples = AMRtoTriples(amr_data, self.propbank_data)
+                    self.amr_corpus[dataset_name][doc_name][amr_id]['triples'] = amr_to_triples.convert()
+                    self.amr_corpus[dataset_name][doc_name][amr_id]['amr_string_triples'] \
+                        = amr_to_triples.generate_amr_string_from_triples()
+        return self.amr_corpus
 
-    def generate_tok(self):
-
+    def write_tok_to_file(self):
+        """
+        Write tok to file, for openIE relation extraction later
+        """
+        dir_path = os.path.join(self.output_path, 'tokens')
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
         for dataset_name, dataset in self.amr_corpus.items():
-            if dataset_name != 'dev':
-                continue
-            f = open(dataset_name + '_tok.txt', 'w')
+            f = open(os.path.join(dir_path, dataset_name + '_tok.txt'), 'w')
             for doc_name, doc in dataset.items():
-                for id, amr_data in doc.items():
-                    amr_strings = self.amr_corpus[dataset_name][doc_name][id]['cmaps_text']
+                for amr_id, amr_data in doc.items():
+                    amr_strings = self.amr_corpus[dataset_name][doc_name][amr_id]['amr_string_triples']
                     if not amr_strings:
                         continue
-                    tok = ' '.join(self.amr_corpus[dataset_name][doc_name][id]['tok'])
+                    tok = ' '.join(self.amr_corpus[dataset_name][doc_name][amr_id]['tok'])
                     f.write(tok + '\n')
             f.close()
 
-    def save_amr_string_to_txt(self):
-
+    def write_amr_string_to_file(self):
+        """
+        Write amr_string from each triple to file, for use by AMR generation
+        """
+        dir_path = os.path.join(self.output_path, 'amr_string')
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
         for dataset_name, dataset in self.amr_corpus.items():
-            if dataset_name != 'dev':
-                continue
-            f = open(dataset_name + '.txt', 'w')
+            f = open(os.path.join(dir_path, dataset_name + '_amr_string.txt'), 'w')
             for doc_name, doc in dataset.items():
-                for id, amr_data in doc.items():
-                    amr_strings = self.amr_corpus[dataset_name][doc_name][id]['cmaps_text']
-                    for l, m, r in amr_strings:
-                        if l != '':
-                            f.write(l+'\n')
-                        if r != '':
-                            f.write(r+'\n')
+                for amr_id, amr_data in doc.items():
+                    amr_strings = self.amr_corpus[dataset_name][doc_name][amr_id]['amr_string_triples']
+                    for left, middle, right in amr_strings:
+                        if left != '':
+                            f.write(left+'\n')
+                        if right != '':
+                            f.write(right+'\n')
             f.close()
 
-    def update_from_NLG(self):
+    def write_triples_to_files(self):
         for dataset_name, dataset in self.amr_corpus.items():
             if dataset_name != 'dev':
                 continue
@@ -416,7 +421,11 @@ class AMRCorpusExtConverter:
             f.close()
             f_out.close()
 
-
+    def is_file_exist(self):
+        """
+        Checking whether the file exist or not
+        """
+        return os.path.isfile(os.path.join(self.output_path, 'amr_corpus_ext.pickle'))
 
     def save_data(self):
         output_file = open(os.path.join(self.output_path, 'amr_corpus_ext.pickle'), 'wb')
@@ -443,7 +452,7 @@ if __name__ == '__main__':
     # amr_corpus_ext.convert_amr_to_cmaps()
     # amr_corpus_ext.save_amr_string_to_txt()
     # amr_corpus_ext.save_data()
-    amr_corpus_ext.update_from_NLG()
+    amr_corpus_ext.write_triples_to_files()
 
 
 
